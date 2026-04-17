@@ -1,11 +1,11 @@
 state.with(
-  request("GET", "http://TON_HOST_S3/buckets")
+  request("GET", state.url)
     .with({"Header": {"Accept": ["application/json"]}})
     .do_request().as(raw_resp,
       raw_resp.Body.decode_json().as(resp,
         resp.Contents.map(item, item.key.split("|..")[1]).as(all_buckets, {
           "url": state.url,
-          "events": [{"debug_count": all_buckets.size(), "debug_sample": all_buckets[0]}],
+          "events": [{"debug_count": all_buckets.size(), "debug_first": all_buckets[0], "debug_last": all_buckets[all_buckets.size()-1]}],
           "want_more": false,
           "cursor": {
             "all_buckets": all_buckets,
