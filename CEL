@@ -1,85 +1,95 @@
 state.with(
-  // --------------------------------------------------------
-  // CYCLE 1 : Pas de cursor = premier appel, recuperer tous les buckets
-  // --------------------------------------------------------
   !has(state.cursor) || !has(state.cursor.all_buckets) ?
     request("GET", "http://TON_HOST_S3/buckets")
       .with({"Header": {"Accept": ["application/json"]}})
-      .do_request().Body.decode_json().as(resp,
-        resp.Contents.map(item,
-          item.key.split("|..")[1]
-        ).as(all_buckets, {
-          "url": state.url,
-          "events": [],
-          "want_more": true,
-          "cursor": {
-            "all_buckets": all_buckets,
-            "offset": 0
-          }
-        })
+      .do_request().as(raw_resp,
+        debug("=== RAW STATUS", raw_resp.StatusCode).as(ignored1,
+          raw_resp.Body.decode_json().as(resp,
+            debug("=== CONTENTS SIZE", resp.Contents.size()).as(ignored2,
+              debug("=== FIRST BUCKET RAW", resp.Contents[0]).as(ignored3,
+                resp.Contents.map(item,
+                  item.key.split("|..")[1]
+                ).as(all_buckets,
+                  debug("=== BUCKET NAMES SAMPLE", all_buckets.slice(0, 3)).as(ignored4, {
+                    "url": state.url,
+                    "events": [],
+                    "want_more": false,
+                    "cursor": {
+                      "all_buckets": all_buckets,
+                      "offset": 0
+                    }
+                  })
+                )
+              )
+            )
+          )
+        )
       )
   :
-  // --------------------------------------------------------
-  // CYCLES SUIVANTS : traiter un batch de 100 buckets
-  // --------------------------------------------------------
   state.cursor.all_buckets.slice(
     int(state.cursor.offset),
     math.min(int(state.cursor.offset) + 100, state.cursor.all_buckets.size())
   ).as(batch,
+    debug("=== PROCESSING BATCH offset", state.cursor.offset).as(ignored5,
+      debug("=== BATCH SIZE", batch.size()).as(ignored6,
 
-    // ETAPE 2 : POST UTAPI avec le batch courant
-    request("POST", "http://TON_HOST_UTAPI:8100/buckets?Action=ListRecentMetrics&Version=20160815")
-      .with({
-        "Header": {
-          "Content-Type": ["application/json"],
-          "Authorization": ["AWS " + state.aws_auth]
-        },
-        "Body": {"buckets": batch}.encode_json()
-      })
-      .do_request().Body.decode_json().as(utapi_metrics,
+        request("POST", "http://TON_HOST_UTAPI:8100/buckets?Action=ListRecentMetrics&Version=20160815")
+          .with({
+            "Header": {
+              "Content-Type": ["application/json"],
+              "Authorization": ["AWS " + state.aws_auth]
+            },
+            "Body": {"buckets": batch}.encode_json()
+          })
+          .do_request().as(utapi_raw,
+            debug("=== UTAPI STATUS", utapi_raw.StatusCode).as(ignored7,
+              utapi_raw.Body.decode_json().as(utapi_metrics,
+                debug("=== UTAPI METRICS COUNT", utapi_metrics.size()).as(ignored8,
 
-        // ETAPE 3 : GET metadata pour chaque bucket du batch
-        // + merge avec metrics
-        batch.map(i, i,
-          batch[i].as(bucket_name,
-            request("GET", "http://TON_HOST_METADATA/buckets/" + bucket_name)
-              .with({"Header": {"Accept": ["application/json"]}})
-              .do_request().Body.decode_json().as(meta, {
-                "@timestamp": now(),
-                "bucket": {
-                  "name": bucket_name,
-                  "owner": meta.owner,
-                  "ownerDisplayName": meta.ownerDisplayName,
-                  "creationDate": meta.creationDate,
-                  "location": meta.locationConstraint,
-                  "tags": meta.tags,
-                  "encryption": meta.serverSideEncryption,
-                  "versioning": meta.versioningConfiguration,
-                  "objectLock": meta.objectLockEnabled
-                },
-                "metrics": {
-                  "timeRange": {
-                    "start": utapi_metrics[i].timeRange[0],
-                    "end": utapi_metrics[i].timeRange[1]
-                  },
-                  "storageUtilized": utapi_metrics[i].storageUtilized[1],
-                  "incomingBytes": utapi_metrics[i].incomingBytes,
-                  "outgoingBytes": utapi_metrics[i].outgoingBytes,
-                  "numberOfObjects": utapi_metrics[i].numberOfObjects[1],
-                  "operations": utapi_metrics[i].operations
-                }
-              })
+                  batch.map(i, i,
+                    batch[i].as(bucket_name,
+                      request("GET", "http://TON_HOST_METADATA/buckets/" + bucket_name)
+                        .with({"Header": {"Accept": ["application/json"]}})
+                        .do_request().Body.decode_json().as(meta, {
+                          "@timestamp": now(),
+                          "bucket": {
+                            "name": bucket_name,
+                            "owner": meta.owner,
+                            "ownerDisplayName": meta.ownerDisplayName,
+                            "creationDate": meta.creationDate,
+                            "location": meta.locationConstraint,
+                            "tags": meta.tags,
+                            "encryption": meta.serverSideEncryption,
+                            "versioning": meta.versioningConfiguration,
+                            "objectLock": meta.objectLockEnabled
+                          },
+                          "metrics": {
+                            "timeRange": {
+                              "start": utapi_metrics[i].timeRange[0],
+                              "end": utapi_metrics[i].timeRange[1]
+                            },
+                            "storageUtilized": utapi_metrics[i].storageUtilized[1],
+                            "incomingBytes": utapi_metrics[i].incomingBytes,
+                            "outgoingBytes": utapi_metrics[i].outgoingBytes,
+                            "numberOfObjects": utapi_metrics[i].numberOfObjects[1],
+                            "operations": utapi_metrics[i].operations
+                          }
+                        })
+                    )
+                  ).as(events, {
+                    "url": state.url,
+                    "events": events,
+                    "want_more": int(state.cursor.offset) + 100 < state.cursor.all_buckets.size(),
+                    "cursor": {
+                      "all_buckets": state.cursor.all_buckets,
+                      "offset": int(state.cursor.offset) + 100
+                    }
+                  })
+                )
+              )
+            )
           )
-        ).as(events, {
-          "url": state.url,
-          "events": events,
-          // Continuer si il reste des buckets a traiter
-          "want_more": int(state.cursor.offset) + 100 < state.cursor.all_buckets.size(),
-          "cursor": {
-            "all_buckets": state.cursor.all_buckets,
-            "offset": int(state.cursor.offset) + 100
-          }
-        })
       )
+    )
   )
 )
