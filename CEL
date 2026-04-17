@@ -1,116 +1,17 @@
 state.with(
-  !has(state.cursor) || !has(state.cursor.all_buckets) ?
-
-    // --------------------------------------------------------
-    // CYCLE 1 : Recuperer la liste des buckets
-    // --------------------------------------------------------
-    request("GET", "http://TON_HOST_S3/buckets")
-      .with({"Header": {"Accept": ["application/json"]}})
-      .do_request().as(raw_resp,
-        debug("=== RAW STATUS", raw_resp.StatusCode).as(ignored1,
-          raw_resp.Body.decode_json().as(resp,
-            debug("=== CONTENTS SIZE", resp.Contents.size()).as(ignored2,
-              debug("=== FIRST BUCKET RAW", resp.Contents[0]).as(ignored3,
-                resp.Contents.map(item,
-                  item.key.split("|..")[1]
-                ).as(all_buckets,
-                  debug("=== BUCKET NAMES SAMPLE", all_buckets.filter(idx, val, idx < 3)).as(ignored4, {
-                    "url": state.url,
-                    "events": [],
-                    "want_more": false,
-                    "cursor": {
-                      "all_buckets": all_buckets,
-                      "offset": 0
-                    }
-                  })
-                )
-              )
-            )
-          )
-        )
-      )
-
-  :
-
-    // --------------------------------------------------------
-    // CYCLES SUIVANTS : traiter un batch de 100 buckets
-    // --------------------------------------------------------
-    state.cursor.all_buckets.filter(idx, val,
-      idx >= int(state.cursor.offset) &&
-      idx < int(state.cursor.offset) + 100
-    ).as(batch,
-      debug("=== PROCESSING BATCH offset", state.cursor.offset).as(ignored5,
-        debug("=== BATCH SIZE", batch.size()).as(ignored6,
-
-          // ETAPE 2 : POST UTAPI avec AWS SigV4
-          request("POST", "http://TON_HOST_UTAPI:8100/buckets?Action=ListRecentMetrics&Version=20160815")
-            .with({
-              "Header": {"Content-Type": ["application/json"]},
-              "Body": {"buckets": batch}.encode_json()
-            })
-            .sign_aws_from_static(
-              state.aws_access_key,
-              state.aws_secret_key,
-              "",
-              {
-                "service": "s3",
-                "region": "us-east-1",
-                "sign_time": now(),
-                "no_hoist": false,
-                "no_escape": false,
-                "disable_session_token": true
-              }
-            )
-            .do_request().as(utapi_raw,
-              debug("=== UTAPI STATUS", utapi_raw.StatusCode).as(ignored7,
-                utapi_raw.Body.decode_json().as(utapi_metrics,
-                  debug("=== UTAPI METRICS COUNT", utapi_metrics.size()).as(ignored8,
-
-                    // ETAPE 3 : GET metadata + merge pour chaque bucket du batch
-                    batch.map(idx, val,
-                      val.as(bucket_name,
-                        request("GET", "http://TON_HOST_METADATA/buckets/" + bucket_name)
-                          .with({"Header": {"Accept": ["application/json"]}})
-                          .do_request().Body.decode_json().as(meta, {
-                            "@timestamp": now(),
-                            "bucket": {
-                              "name": bucket_name,
-                              "owner": meta.owner,
-                              "ownerDisplayName": meta.ownerDisplayName,
-                              "creationDate": meta.creationDate,
-                              "location": meta.locationConstraint,
-                              "tags": meta.tags,
-                              "encryption": meta.serverSideEncryption,
-                              "versioning": meta.versioningConfiguration,
-                              "objectLock": meta.objectLockEnabled
-                            },
-                            "metrics": {
-                              "timeRange": {
-                                "start": utapi_metrics[idx].timeRange[0],
-                                "end": utapi_metrics[idx].timeRange[1]
-                              },
-                              "storageUtilized": utapi_metrics[idx].storageUtilized[1],
-                              "incomingBytes": utapi_metrics[idx].incomingBytes,
-                              "outgoingBytes": utapi_metrics[idx].outgoingBytes,
-                              "numberOfObjects": utapi_metrics[idx].numberOfObjects[1],
-                              "operations": utapi_metrics[idx].operations
-                            }
-                          })
-                      )
-                    ).as(events, {
-                      "url": state.url,
-                      "events": events,
-                      "want_more": int(state.cursor.offset) + 100 < state.cursor.all_buckets.size(),
-                      "cursor": {
-                        "all_buckets": state.cursor.all_buckets,
-                        "offset": int(state.cursor.offset) + 100
-                      }
-                    })
-                  )
-                )
-              )
-            )
-        )
+  request("GET", "http://TON_HOST_S3/buckets")
+    .with({"Header": {"Accept": ["application/json"]}})
+    .do_request().as(raw_resp,
+      raw_resp.Body.decode_json().as(resp,
+        resp.Contents.map(item, item.key.split("|..")[1]).as(all_buckets, {
+          "url": state.url,
+          "events": [{"debug_count": all_buckets.size(), "debug_sample": all_buckets[0]}],
+          "want_more": false,
+          "cursor": {
+            "all_buckets": all_buckets,
+            "offset": 0
+          }
+        })
       )
     )
 )
