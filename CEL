@@ -10,7 +10,7 @@ state.with(
                 resp.Contents.map(item,
                   item.key.split("|..")[1]
                 ).as(all_buckets,
-                  debug("=== BUCKET NAMES SAMPLE", all_buckets.slice(0, 3)).as(ignored4, {
+                  debug("=== BUCKET NAMES SAMPLE", all_buckets[0:3]).as(ignored4, {
                     "url": state.url,
                     "events": [],
                     "want_more": false,
@@ -26,10 +26,12 @@ state.with(
         )
       )
   :
-  state.cursor.all_buckets.slice(
-    int(state.cursor.offset),
-    math.min(int(state.cursor.offset) + 100, state.cursor.all_buckets.size())
-  ).as(batch,
+  state.cursor.all_buckets[
+    int(state.cursor.offset) :
+    (int(state.cursor.offset) + 100 < state.cursor.all_buckets.size() ?
+      int(state.cursor.offset) + 100 :
+      state.cursor.all_buckets.size())
+  ].as(batch,
     debug("=== PROCESSING BATCH offset", state.cursor.offset).as(ignored5,
       debug("=== BATCH SIZE", batch.size()).as(ignored6,
 
