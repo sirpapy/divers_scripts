@@ -1,7 +1,6 @@
 state.with(
   !has(state.cursor) || !has(state.cursor.all_buckets) ?
 
-    // CYCLE 1 : charger les buckets
     request("GET", state.url)
       .with({"Header": {"Accept": ["application/json"]}})
       .do_request().as(raw_resp,
@@ -20,10 +19,9 @@ state.with(
 
   :
 
-    // CYCLES SUIVANTS : traiter un batch de 100
-    state.cursor.all_buckets.filter(idx, val,
-      idx >= int(state.cursor.offset) &&
-      idx < int(state.cursor.offset) + 100
+    state.cursor.all_buckets.map(i, i).filter(x,
+      state.cursor.all_buckets.indexOf(x) >= int(state.cursor.offset) &&
+      state.cursor.all_buckets.indexOf(x) < int(state.cursor.offset) + 100
     ).as(batch,
       request("POST", state.utapi_url)
         .with({
