@@ -1,127 +1,85 @@
-# ============================================================
-# CEL Custom API - Scality Storage Metrics Collector
-# ============================================================
-# Etape 1 : GET liste des buckets (sans pagination pour l'instant)
-# Etape 2 : POST UTAPI metrics par batch de 100 (AWS Auth)
-# Etape 3 : GET metadata par bucket
-# Etape 4 : Merge + emission des evenements
-# ============================================================
-
-program: |
+state.with(
   // --------------------------------------------------------
-  // ETAPE 1 : Recuperer la liste des buckets
+  // CYCLE 1 : Pas de cursor = premier appel, recuperer tous les buckets
   // --------------------------------------------------------
-  var buckets_response = get(
-    "http://TON_HOST_S3/buckets",
-    {
-      "Accept": ["application/json"]
-    }
-  );
-
-  var contents = buckets_response.Body.Contents;
-
-  // Extraire le nom du bucket depuis le champ key (partie apres |..)
-  var bucket_names = contents.map(item,
-    item.key.split("|..")[1]
-  );
-
+  !has(state.cursor) || !has(state.cursor.all_buckets) ?
+    request("GET", "http://TON_HOST_S3/buckets")
+      .with({"Header": {"Accept": ["application/json"]}})
+      .do_request().Body.decode_json().as(resp,
+        resp.Contents.map(item,
+          item.key.split("|..")[1]
+        ).as(all_buckets, {
+          "url": state.url,
+          "events": [],
+          "want_more": true,
+          "cursor": {
+            "all_buckets": all_buckets,
+            "offset": 0
+          }
+        })
+      )
+  :
   // --------------------------------------------------------
-  // ETAPE 2 : POST UTAPI par batch de 100
+  // CYCLES SUIVANTS : traiter un batch de 100 buckets
   // --------------------------------------------------------
-  var metrics_map = {};
-  var batch_size = 100;
-  var i = 0;
+  state.cursor.all_buckets.slice(
+    int(state.cursor.offset),
+    math.min(int(state.cursor.offset) + 100, state.cursor.all_buckets.size())
+  ).as(batch,
 
-  while (i < bucket_names.size()) {
-    var batch = bucket_names.slice(i, math.min(i + batch_size, bucket_names.size()));
-
-    var utapi_response = post(
-      "http://TON_HOST_UTAPI:8100/buckets?Action=ListRecentMetrics&Version=20160815",
-      {
-        "Content-Type": ["application/json"],
-        "Authorization": ["AWS4-HMAC-SHA256 " + aws_auth]  // gere par CEL via config
-      },
-      {
-        "buckets": batch
-      }
-    );
-
-    // Mapper les metrics par nom de bucket
-    var j = 0;
-    while (j < utapi_response.Body.size()) {
-      var metric = utapi_response.Body[j];
-      metrics_map[batch[j]] = metric;
-      j = j + 1;
-    }
-
-    i = i + batch_size;
-  }
-
-  // --------------------------------------------------------
-  // ETAPE 3 + ETAPE 4 : GET metadata + merge + emission
-  // --------------------------------------------------------
-  var events = [];
-
-  var k = 0;
-  while (k < bucket_names.size()) {
-    var bucket_name = bucket_names[k];
-
-    // GET metadata
-    var meta_response = get(
-      "http://TON_HOST_METADATA/buckets/" + bucket_name,
-      {
-        "Accept": ["application/json"]
-      }
-    );
-
-    var meta = meta_response.Body;
-    var metrics = metrics_map[bucket_name];
-
-    // Merge + document final
-    var doc = {
-      "@timestamp": now(),
-      "bucket": {
-        "name": bucket_name,
-        "owner": meta.owner,
-        "ownerDisplayName": meta.ownerDisplayName,
-        "creationDate": meta.creationDate,
-        "location": meta.locationConstraint,
-        "tags": meta.tags,
-        "encryption": meta.serverSideEncryption,
-        "versioning": meta.versioningConfiguration,
-        "objectLock": meta.objectLockEnabled
-      },
-      "metrics": {
-        "timeRange": {
-          "start": metrics.timeRange[0],
-          "end": metrics.timeRange[1]
+    // ETAPE 2 : POST UTAPI avec le batch courant
+    request("POST", "http://TON_HOST_UTAPI:8100/buckets?Action=ListRecentMetrics&Version=20160815")
+      .with({
+        "Header": {
+          "Content-Type": ["application/json"],
+          "Authorization": ["AWS " + state.aws_auth]
         },
-        "storageUtilized": {
-          "current": metrics.storageUtilized[1],
-          "previous": metrics.storageUtilized[0]
-        },
-        "incomingBytes": metrics.incomingBytes,
-        "outgoingBytes": metrics.outgoingBytes,
-        "numberOfObjects": {
-          "current": metrics.numberOfObjects[1],
-          "previous": metrics.numberOfObjects[0]
-        },
-        "operations": metrics.operations
-      }
-    };
+        "Body": {"buckets": batch}.encode_json()
+      })
+      .do_request().Body.decode_json().as(utapi_metrics,
 
-    events.append(doc);
-    k = k + 1;
-  }
-
-  events  // valeur de retour = liste des evenements emis
-
-# ============================================================
-# Configuration AWS Auth pour UTAPI
-# ============================================================
-auth:
-  aws:
-    access_key_id: ${AWS_ACCESS_KEY_ID}
-    secret_access_key: ${AWS_SECRET_ACCESS_KEY}
-    service: s3
-    region: us-east-1  # adapter selon ta config Scality
+        // ETAPE 3 : GET metadata pour chaque bucket du batch
+        // + merge avec metrics
+        batch.map(i, i,
+          batch[i].as(bucket_name,
+            request("GET", "http://TON_HOST_METADATA/buckets/" + bucket_name)
+              .with({"Header": {"Accept": ["application/json"]}})
+              .do_request().Body.decode_json().as(meta, {
+                "@timestamp": now(),
+                "bucket": {
+                  "name": bucket_name,
+                  "owner": meta.owner,
+                  "ownerDisplayName": meta.ownerDisplayName,
+                  "creationDate": meta.creationDate,
+                  "location": meta.locationConstraint,
+                  "tags": meta.tags,
+                  "encryption": meta.serverSideEncryption,
+                  "versioning": meta.versioningConfiguration,
+                  "objectLock": meta.objectLockEnabled
+                },
+                "metrics": {
+                  "timeRange": {
+                    "start": utapi_metrics[i].timeRange[0],
+                    "end": utapi_metrics[i].timeRange[1]
+                  },
+                  "storageUtilized": utapi_metrics[i].storageUtilized[1],
+                  "incomingBytes": utapi_metrics[i].incomingBytes,
+                  "outgoingBytes": utapi_metrics[i].outgoingBytes,
+                  "numberOfObjects": utapi_metrics[i].numberOfObjects[1],
+                  "operations": utapi_metrics[i].operations
+                }
+              })
+          )
+        ).as(events, {
+          "url": state.url,
+          "events": events,
+          // Continuer si il reste des buckets a traiter
+          "want_more": int(state.cursor.offset) + 100 < state.cursor.all_buckets.size(),
+          "cursor": {
+            "all_buckets": state.cursor.all_buckets,
+            "offset": int(state.cursor.offset) + 100
+          }
+        })
+      )
+  )
+)
