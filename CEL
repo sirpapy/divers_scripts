@@ -19,36 +19,37 @@ state.with(
 
   :
 
-    state.cursor.all_buckets
-      .drop(int(state.cursor.offset))
-      .map(x, x, state.cursor.all_buckets.indexOf(x) < int(state.cursor.offset) + 100)
-      .as(batch,
-        request("POST", state.utapi_url)
-          .with({
-            "Header": {"Content-Type": ["application/json"]},
-            "Body": {"buckets": batch}.encode_json()
-          })
-          .sign_aws_from_static(
-            state.aws_access_key,
-            state.aws_secret_key,
-            "",
-            {
-              "service": "s3",
-              "region": "us-east-1",
-              "sign_time": now(),
-              "no_hoist": false,
-              "no_escape": false,
-              "disable_session_token": true
-            }
-          )
-          .do_request().as(utapi_raw, {
-            "url": state.url,
-            "events": [{"debug_offset": state.cursor.offset, "debug_status": utapi_raw.StatusCode}],
-            "want_more": int(state.cursor.offset) + 100 < state.cursor.all_buckets.size(),
-            "cursor": {
-              "all_buckets": state.cursor.all_buckets,
-              "offset": int(state.cursor.offset) + 100
-            }
-          })
-      )
+    // Remplacement du filter() par un slicing [debut:fin] avec protection Out-of-Bounds
+    state.cursor.all_buckets[
+      int(state.cursor.offset) : 
+      (int(state.cursor.offset) + 100 < state.cursor.all_buckets.size() ? int(state.cursor.offset) + 100 : state.cursor.all_buckets.size())
+    ].as(batch,
+      request("POST", state.utapi_url)
+        .with({
+          "Header": {"Content-Type": ["application/json"]},
+          "Body": {"buckets": batch}.encode_json()
+        })
+        .sign_aws_from_static(
+          state.aws_access_key,
+          state.aws_secret_key,
+          "",
+          {
+            "service": "s3",
+            "region": "us-east-1",
+            "sign_time": now(),
+            "no_hoist": false,
+            "no_escape": false,
+            "disable_session_token": true
+          }
+        )
+        .do_request().as(utapi_raw, {
+          "url": state.url,
+          "events": [{"debug_batch_offset": state.cursor.offset, "debug_batch_size": batch.size(), "debug_utapi_status": utapi_raw.StatusCode}],
+          "want_more": int(state.cursor.offset) + 100 < state.cursor.all_buckets.size(),
+          "cursor": {
+            "all_buckets": state.cursor.all_buckets,
+            "offset": int(state.cursor.offset) + 100
+          }
+        })
+    )
 )
